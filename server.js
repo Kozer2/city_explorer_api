@@ -5,6 +5,7 @@ require('dotenv').config(); // required for dot env file
 const express = require('express');
 const cors = require('cors');
 const pg = require('pg');
+const client = new pg.Client(process.env.DATABASE_URL);
 const superagent = require('superagent');
 const app = express();
 
@@ -18,26 +19,61 @@ console.log(`The port is: ${PORT}`);
 // app.use(express.static('./public'));
 app.use(cors());
 
-//app.get('/', (request, response)=> {
-//     response.send('You are on the homepage.');
-// });
-
-
-// location path
-app.get('/location', (request, response) => { 
-    let city = request.query.city;
-    const locationKey = process.env.LOCATION_KEY;
-    let url = `https://us1.locationiq.com/v1/search.php?key=${locationKey}&q=${city}&format=json`
-    superagent.get(url)
-        .then(saResults => {
-            let responseObj = new Location(city, saResults.body[0]);
-            response.status(200).send(responseObj);
-            // console.log("Location info", responseObj);
-        })
+// code from Craig to adapt 
+app.get('/location', locationHandler);
+function locationHandler(request, response){
+    const city = request.query.city;
+    // console.log('city', city);
+    getLocationData(city)    //location.
+        .then(data => sendJson(data, response))
         .catch((error) => {
             response.status(500).send('Location lookup failed', error);
-        })
-});
+        });
+} // end locationHandler
+
+function getLocationData(city){
+    let SQL = 'SELECT * FROM locationtable WHERE search_query = $1';
+    let values = [city];
+    // console.log('values', values);
+    return client.query(SQL, values)
+        .then(results => {
+            // console.log('result', results);
+            if (results.rowCount) {return results.rows[0]; }
+            else {
+                let queryParams = {
+                    key: process.env.LOCATION_KEY,
+                    city: city,
+                    format: 'json',
+                    limit: 1
+                };
+                let url = `https://us1.locationiq.com/v1/search.php` // maybe end at search
+                return superagent.get(url)
+                    .query(queryParams)
+                    .then(data => {
+                        cacheLocation(city, data.body)
+                        console.log(data.body);
+                    });
+            }
+        });
+}; // end locationData
+
+function cacheLocation(city, data){
+    const location = new Location(city, data[0]);
+    // console.log('location', location);
+    let SQL = `INSERT INTO locationtable (search_query, formatted_query, latitude, longitude) VALUES ($1, $2, $3, $4) RETURNING *`;
+    let values = [city, location.formatted_query, location.latitude, location.longitude];
+    return client.query(SQL, values)
+        .then(results => {
+            return results[0];
+            // const savedLocation = results.rows[0];
+            // return savedLocation;
+        });
+} // end cacheLocation
+
+
+function sendJson(data,response){
+    response.status(200).json(data);
+};
 
 // weather path
 app.get('/weather', (request, response) => { 
@@ -96,7 +132,7 @@ app.get(('/parks'), (request, response) =>{
 // location constructor
 function Location(searchQuery, object) {
     this.search_query = searchQuery;
-    this.formattedQuery = object.display_name;
+    this.formatted_query = object.display_name;
     this.latitude = object.lat;
     this.longitude = object.lon;
 }
@@ -117,5 +153,6 @@ function Parks(parkObj){
 
 
 // function to catch errors
+client.connect();
 app.use('*', (request,response)=> response.send("Route does not exist.")); // Needs to come after all other app gets 
 app.listen(PORT,() => console.log(`Listening on port ${PORT}`)); // needs to be below the app.use('*')
